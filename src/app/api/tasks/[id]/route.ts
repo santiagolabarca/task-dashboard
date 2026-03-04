@@ -10,7 +10,7 @@ export async function PATCH(
   context: { params: { id: string } }
 ) {
   try {
-    const user = getCurrentUserFromCookies();
+    const user = await getCurrentUserFromCookies();
     if (!user) {
       return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
     }
@@ -31,7 +31,7 @@ export async function PATCH(
     };
 
     const patch = body.patch || {};
-    const existing = getDbTaskByIdForUser(id, user.id);
+    const existing = await getDbTaskByIdForUser(id, user.id);
     if (!existing) {
       return NextResponse.json({ ok: false, error: "Task not found" }, { status: 404 });
     }
@@ -56,7 +56,7 @@ export async function PATCH(
 
     const statusNextStep = computeStatusNextStep(merged.dueDateNextStep, merged.statusFinalOutcome);
 
-    const updated = updateDbTaskForUser(id, user.id, { ...merged, statusNextStep });
+    const updated = await updateDbTaskForUser(id, user.id, { ...merged, statusNextStep });
 
     if (!updated) {
       return NextResponse.json({ ok: false, error: "Task not found" }, { status: 404 });

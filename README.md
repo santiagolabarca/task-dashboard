@@ -1,13 +1,13 @@
-# Task Dashboard (Next.js + Local SQLite)
+# Task Dashboard (Next.js + Postgres)
 
-Mobile-responsive, local-first task dashboard backed by a real local database.
+Mobile-responsive task dashboard backed by Postgres.
 
 ## Stack
 
 - Next.js 14 (App Router)
 - TypeScript
 - TailwindCSS
-- SQLite via Node built-in `node:sqlite`
+- Postgres via `pg`
 
 ## Quick Start
 
@@ -26,7 +26,7 @@ Open `http://localhost:3000`.
 Set these in `.env.local`:
 
 ```env
-TASK_DB_PATH=./data/tasks.db
+DATABASE_URL=
 DEFAULT_OWNER_EMAIL=Santiago.labarca@berkeley.edu
 DEFAULT_OWNER_NAME=Santiago Labarca
 NEXT_PUBLIC_GOOGLE_CLIENT_ID=
@@ -37,13 +37,13 @@ NEXT_PUBLIC_APPS_SCRIPT_URL=
 
 ## Database Commands
 
-Initialize local DB/table:
+Initialize tables/indexes in Postgres:
 
 ```bash
 npm run db:init
 ```
 
-One-time import from existing Apps Script source:
+One-time import from existing Apps Script source into Postgres:
 
 ```bash
 npm run db:migrate:from-sheet
@@ -62,7 +62,7 @@ npm run db:migrate:from-sheet
 
 ## Notes
 
-- Main app runtime uses local SQLite with per-user task isolation.
+- Main app runtime uses Postgres with per-user task isolation.
 - Sign-in uses Google Identity (ID token) and keeps a server session cookie for 15 days.
 - Existing imported tasks are attached to `DEFAULT_OWNER_EMAIL` so your account starts with your data.
 - `apps-script.gs` is only needed as optional source for one-time migration.

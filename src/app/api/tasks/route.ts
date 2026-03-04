@@ -7,11 +7,11 @@ export const runtime = "nodejs";
 
 export async function GET() {
   try {
-    const user = getCurrentUserFromCookies();
+    const user = await getCurrentUserFromCookies();
     if (!user) {
       return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
     }
-    return NextResponse.json({ tasks: listDbTasksByUser(user.id) });
+    return NextResponse.json({ tasks: await listDbTasksByUser(user.id) });
   } catch (error) {
     return NextResponse.json(
       { ok: false, error: error instanceof Error ? error.message : "Failed to list tasks" },
@@ -22,7 +22,7 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
-    const user = getCurrentUserFromCookies();
+    const user = await getCurrentUserFromCookies();
     if (!user) {
       return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
     }
@@ -47,7 +47,7 @@ export async function POST(request: NextRequest) {
 
     const statusNextStep = computeStatusNextStep(dueDateNextStep, statusFinalOutcome);
 
-    const rowId = createDbTaskForUser(user.id, {
+    const rowId = await createDbTaskForUser(user.id, {
       toDo,
       statusFinalOutcome,
       tipo,

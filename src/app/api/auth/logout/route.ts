@@ -9,7 +9,7 @@ export const runtime = "nodejs";
 
 export async function POST() {
   const token = getCurrentSessionToken();
-  destroyCurrentSession(token);
+  await destroyCurrentSession(token);
 
   const response = NextResponse.json({ ok: true });
   clearSessionCookie(response);

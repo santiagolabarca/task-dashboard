@@ -15,8 +15,8 @@ export async function POST(request: NextRequest) {
     }
 
     const verified = await verifyGoogleCredential(credential);
-    const user = upsertGoogleUser(verified);
-    const session = createUserSession(user.id);
+    const user = await upsertGoogleUser(verified);
+    const session = await createUserSession(user.id);
 
     const response = NextResponse.json({
       ok: true,

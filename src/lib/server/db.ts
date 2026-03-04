@@ -1,61 +1,5 @@
 import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
-
-const dbFilePath = process.env.TASK_DB_PATH || "./data/tasks.db";
-const resolvedDbPath = path.resolve(process.cwd(), dbFilePath);
-
-fs.mkdirSync(path.dirname(resolvedDbPath), { recursive: true });
-
-const db = new DatabaseSync(resolvedDbPath);
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL DEFAULT '',
-    google_sub TEXT UNIQUE,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )
-`);
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    token TEXT NOT NULL UNIQUE,
-    user_id INTEGER NOT NULL,
-    expires_at TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (user_id) REFERENCES users (id)
-  )
-`);
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    to_do TEXT NOT NULL,
-    status_final_outcome TEXT NOT NULL,
-    tipo TEXT NOT NULL,
-    next_step TEXT NOT NULL DEFAULT '',
-    due_date_next_step TEXT NOT NULL,
-    status_next_step TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )
-`);
-
-const taskColumns = db
-  .prepare(`PRAGMA table_info(tasks)`)
-  .all() as Array<{ name: string }>;
-
-if (!taskColumns.some((column) => column.name === "user_id")) {
-  db.exec(`ALTER TABLE tasks ADD COLUMN user_id INTEGER`);
-}
-
-db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)`);
+import { Pool } from "pg";
 
 type TaskRow = {
   id: number;
@@ -65,14 +9,12 @@ type TaskRow = {
   next_step: string;
   due_date_next_step: string;
   status_next_step: string;
-  user_id: number;
 };
 
 type UserRow = {
   id: number;
   email: string;
   name: string;
-  google_sub: string | null;
 };
 
 export type DbTask = {
@@ -91,9 +33,35 @@ export type DbUser = {
   name: string;
 };
 
+declare global {
+  // eslint-disable-next-line no-var
+  var __taskDashboardPgPool: Pool | undefined;
+  // eslint-disable-next-line no-var
+  var __taskDashboardInitPromise: Promise<void> | undefined;
+}
+
+function getPool(): Pool {
+  if (!global.__taskDashboardPgPool) {
+    const connectionString = process.env.DATABASE_URL;
+    if (!connectionString) {
+      throw new Error("Missing DATABASE_URL");
+    }
+
+    global.__taskDashboardPgPool = new Pool({
+      connectionString,
+      ssl:
+        process.env.NODE_ENV === "production"
+          ? { rejectUnauthorized: false }
+          : undefined
+    });
+  }
+
+  return global.__taskDashboardPgPool;
+}
+
 function toTask(row: TaskRow): DbTask {
   return {
-    rowId: row.id,
+    rowId: Number(row.id),
     toDo: row.to_do,
     statusFinalOutcome: row.status_final_outcome,
     tipo: row.tipo,
@@ -105,75 +73,152 @@ function toTask(row: TaskRow): DbTask {
 
 function toUser(row: UserRow): DbUser {
   return {
-    id: row.id,
+    id: Number(row.id),
     email: row.email,
     name: row.name
   };
 }
 
-function toSqliteDate(date: Date): string {
-  return date.toISOString().slice(0, 19).replace("T", " ");
-}
+async function ensureOwnerUserAndBackfill(pool: Pool): Promise<void> {
+  const ownerEmail = (process.env.DEFAULT_OWNER_EMAIL || "Santiago.labarca@berkeley.edu")
+    .trim()
+    .toLowerCase();
+  const ownerName = (process.env.DEFAULT_OWNER_NAME || "Santiago Labarca").trim();
 
-function ensureOwnerUserAndBackfill(): void {
-  const ownerEmail = (process.env.DEFAULT_OWNER_EMAIL || "Santiago.labarca@berkeley.edu").trim();
-  const ownerName = process.env.DEFAULT_OWNER_NAME || "Santiago Labarca";
   if (!ownerEmail) return;
 
-  const owner = findUserByEmail(ownerEmail) || createUser({ email: ownerEmail, name: ownerName });
-
-  db.prepare(`UPDATE tasks SET user_id = ? WHERE user_id IS NULL`).run(owner.id);
-}
-
-ensureOwnerUserAndBackfill();
-
-export function listDbTasksByUser(userId: number): DbTask[] {
-  const rows = db
-    .prepare(
-      `SELECT id, to_do, status_final_outcome, tipo, next_step, due_date_next_step, status_next_step, user_id
-       FROM tasks
-       WHERE user_id = ?
-       ORDER BY due_date_next_step ASC, id ASC`
-    )
-    .all(userId) as TaskRow[];
-  return rows.map(toTask);
-}
-
-export function createDbTaskForUser(userId: number, input: Omit<DbTask, "rowId">): number {
-  const stmt = db.prepare(
-    `INSERT INTO tasks (to_do, status_final_outcome, tipo, next_step, due_date_next_step, status_next_step, user_id, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+  const ownerQuery = await pool.query<UserRow>(
+    `INSERT INTO users (email, name)
+     VALUES ($1, $2)
+     ON CONFLICT (email)
+     DO UPDATE SET name = COALESCE(NULLIF(EXCLUDED.name, ''), users.name), updated_at = NOW()
+     RETURNING id, email, name`,
+    [ownerEmail, ownerName]
   );
-  const result = stmt.run(
-    input.toDo,
-    input.statusFinalOutcome,
-    input.tipo,
-    input.nextStep,
-    input.dueDateNextStep,
-    input.statusNextStep,
-    userId
+
+  const owner = ownerQuery.rows[0];
+  if (!owner) return;
+
+  await pool.query(`UPDATE tasks SET user_id = $1 WHERE user_id IS NULL`, [owner.id]);
+}
+
+async function initialize(): Promise<void> {
+  if (!global.__taskDashboardInitPromise) {
+    global.__taskDashboardInitPromise = (async () => {
+      const pool = getPool();
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS users (
+          id BIGSERIAL PRIMARY KEY,
+          email TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL DEFAULT '',
+          google_sub TEXT UNIQUE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          id BIGSERIAL PRIMARY KEY,
+          token TEXT NOT NULL UNIQUE,
+          user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          expires_at TIMESTAMPTZ NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS tasks (
+          id BIGSERIAL PRIMARY KEY,
+          user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+          to_do TEXT NOT NULL,
+          status_final_outcome TEXT NOT NULL,
+          tipo TEXT NOT NULL,
+          next_step TEXT NOT NULL DEFAULT '',
+          due_date_next_step DATE NOT NULL,
+          status_next_step TEXT NOT NULL DEFAULT '',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)`);
+
+      await ensureOwnerUserAndBackfill(pool);
+    })();
+  }
+
+  await global.__taskDashboardInitPromise;
+}
+
+export async function initDb(): Promise<void> {
+  await initialize();
+}
+
+export async function listDbTasksByUser(userId: number): Promise<DbTask[]> {
+  await initialize();
+
+  const result = await getPool().query<TaskRow>(
+    `SELECT id, to_do, status_final_outcome, tipo, next_step,
+            to_char(due_date_next_step, 'YYYY-MM-DD') AS due_date_next_step,
+            status_next_step
+     FROM tasks
+     WHERE user_id = $1
+     ORDER BY due_date_next_step ASC, id ASC`,
+    [userId]
   );
-  return Number(result.lastInsertRowid);
+
+  return result.rows.map(toTask);
 }
 
-export function getDbTaskByIdForUser(id: number, userId: number): DbTask | null {
-  const row = db
-    .prepare(
-      `SELECT id, to_do, status_final_outcome, tipo, next_step, due_date_next_step, status_next_step, user_id
-       FROM tasks
-       WHERE id = ? AND user_id = ?`
-    )
-    .get(id, userId) as TaskRow | undefined;
-  if (!row) return null;
-  return toTask(row);
+export async function createDbTaskForUser(
+  userId: number,
+  input: Omit<DbTask, "rowId">
+): Promise<number> {
+  await initialize();
+
+  const result = await getPool().query<{ id: number }>(
+    `INSERT INTO tasks (user_id, to_do, status_final_outcome, tipo, next_step, due_date_next_step, status_next_step, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6::date, $7, NOW())
+     RETURNING id`,
+    [
+      userId,
+      input.toDo,
+      input.statusFinalOutcome,
+      input.tipo,
+      input.nextStep,
+      input.dueDateNextStep,
+      input.statusNextStep
+    ]
+  );
+
+  return Number(result.rows[0].id);
 }
 
-export function updateDbTaskForUser(
+export async function getDbTaskByIdForUser(id: number, userId: number): Promise<DbTask | null> {
+  await initialize();
+
+  const result = await getPool().query<TaskRow>(
+    `SELECT id, to_do, status_final_outcome, tipo, next_step,
+            to_char(due_date_next_step, 'YYYY-MM-DD') AS due_date_next_step,
+            status_next_step
+     FROM tasks
+     WHERE id = $1 AND user_id = $2`,
+    [id, userId]
+  );
+
+  if (result.rowCount === 0) return null;
+  return toTask(result.rows[0]);
+}
+
+export async function updateDbTaskForUser(
   id: number,
   userId: number,
   patch: Partial<Omit<DbTask, "rowId">>
-): boolean {
-  const existing = getDbTaskByIdForUser(id, userId);
+): Promise<boolean> {
+  const existing = await getDbTaskByIdForUser(id, userId);
   if (!existing) return false;
 
   const next: Omit<DbTask, "rowId"> = {
@@ -185,160 +230,231 @@ export function updateDbTaskForUser(
     statusNextStep: patch.statusNextStep ?? existing.statusNextStep
   };
 
-  db.prepare(
+  await initialize();
+  const result = await getPool().query(
     `UPDATE tasks
-     SET to_do = ?,
-         status_final_outcome = ?,
-         tipo = ?,
-         next_step = ?,
-         due_date_next_step = ?,
-         status_next_step = ?,
-         updated_at = datetime('now')
-     WHERE id = ? AND user_id = ?`
-  ).run(
-    next.toDo,
-    next.statusFinalOutcome,
-    next.tipo,
-    next.nextStep,
-    next.dueDateNextStep,
-    next.statusNextStep,
-    id,
-    userId
+     SET to_do = $1,
+         status_final_outcome = $2,
+         tipo = $3,
+         next_step = $4,
+         due_date_next_step = $5::date,
+         status_next_step = $6,
+         updated_at = NOW()
+     WHERE id = $7 AND user_id = $8`,
+    [
+      next.toDo,
+      next.statusFinalOutcome,
+      next.tipo,
+      next.nextStep,
+      next.dueDateNextStep,
+      next.statusNextStep,
+      id,
+      userId
+    ]
   );
 
-  return true;
+  return (result.rowCount || 0) > 0;
 }
 
-export function replaceAllDbTasksForUser(userId: number, tasks: Array<Omit<DbTask, "rowId">>): void {
-  db.exec("BEGIN");
+export async function replaceAllDbTasksForUser(
+  userId: number,
+  tasks: Array<Omit<DbTask, "rowId">>
+): Promise<void> {
+  await initialize();
+
+  const client = await getPool().connect();
   try {
-    db.prepare("DELETE FROM tasks WHERE user_id = ?").run(userId);
-    const insertStmt = db.prepare(
-      `INSERT INTO tasks (to_do, status_final_outcome, tipo, next_step, due_date_next_step, status_next_step, user_id, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`
-    );
+    await client.query("BEGIN");
+    await client.query(`DELETE FROM tasks WHERE user_id = $1`, [userId]);
 
     for (const task of tasks) {
-      insertStmt.run(
-        task.toDo,
-        task.statusFinalOutcome,
-        task.tipo,
-        task.nextStep,
-        task.dueDateNextStep,
-        task.statusNextStep,
-        userId
+      await client.query(
+        `INSERT INTO tasks (user_id, to_do, status_final_outcome, tipo, next_step, due_date_next_step, status_next_step, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6::date, $7, NOW())`,
+        [
+          userId,
+          task.toDo,
+          task.statusFinalOutcome,
+          task.tipo,
+          task.nextStep,
+          task.dueDateNextStep,
+          task.statusNextStep
+        ]
       );
     }
-    db.exec("COMMIT");
+
+    await client.query("COMMIT");
   } catch (error) {
-    db.exec("ROLLBACK");
+    await client.query("ROLLBACK");
     throw error;
+  } finally {
+    client.release();
   }
 }
 
-export function findUserByEmail(email: string): DbUser | null {
-  const row = db
-    .prepare(`SELECT id, email, name, google_sub FROM users WHERE lower(email) = lower(?)`)
-    .get(email.trim()) as UserRow | undefined;
-  if (!row) return null;
-  return toUser(row);
+export async function findUserByEmail(email: string): Promise<DbUser | null> {
+  await initialize();
+
+  const result = await getPool().query<UserRow>(
+    `SELECT id, email, name
+     FROM users
+     WHERE lower(email) = lower($1)
+     LIMIT 1`,
+    [email.trim()]
+  );
+
+  if (result.rowCount === 0) return null;
+  return toUser(result.rows[0]);
 }
 
-export function getUserById(id: number): DbUser | null {
-  const row = db
-    .prepare(`SELECT id, email, name, google_sub FROM users WHERE id = ?`)
-    .get(id) as UserRow | undefined;
-  if (!row) return null;
-  return toUser(row);
+export async function getUserById(id: number): Promise<DbUser | null> {
+  await initialize();
+
+  const result = await getPool().query<UserRow>(
+    `SELECT id, email, name
+     FROM users
+     WHERE id = $1
+     LIMIT 1`,
+    [id]
+  );
+
+  if (result.rowCount === 0) return null;
+  return toUser(result.rows[0]);
 }
 
-export function createUser(input: { email: string; name?: string; googleSub?: string }): DbUser {
+export async function createUser(input: {
+  email: string;
+  name?: string;
+  googleSub?: string;
+}): Promise<DbUser> {
+  await initialize();
+
   const email = input.email.trim().toLowerCase();
   const name = (input.name || "").trim();
   const googleSub = input.googleSub?.trim() || null;
 
-  const result = db
-    .prepare(
-      `INSERT INTO users (email, name, google_sub, updated_at)
-       VALUES (?, ?, ?, datetime('now'))`
-    )
-    .run(email, name, googleSub);
+  const result = await getPool().query<UserRow>(
+    `INSERT INTO users (email, name, google_sub, updated_at)
+     VALUES ($1, $2, $3, NOW())
+     RETURNING id, email, name`,
+    [email, name, googleSub]
+  );
 
-  const id = Number(result.lastInsertRowid);
-  const created = getUserById(id);
-  if (!created) throw new Error("Failed to create user");
-  return created;
+  return toUser(result.rows[0]);
 }
 
-export function upsertGoogleUser(input: { email: string; name?: string; googleSub: string }): DbUser {
+export async function upsertGoogleUser(input: {
+  email: string;
+  name?: string;
+  googleSub: string;
+}): Promise<DbUser> {
+  await initialize();
+
   const email = input.email.trim().toLowerCase();
   const name = (input.name || "").trim();
   const googleSub = input.googleSub.trim();
 
-  const byGoogleSub = db
-    .prepare(`SELECT id, email, name, google_sub FROM users WHERE google_sub = ?`)
-    .get(googleSub) as UserRow | undefined;
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
 
-  if (byGoogleSub) {
-    db.prepare(`UPDATE users SET email = ?, name = ?, updated_at = datetime('now') WHERE id = ?`).run(
-      email,
-      name,
-      byGoogleSub.id
+    const byGoogleSub = await client.query<UserRow>(
+      `SELECT id, email, name
+       FROM users
+       WHERE google_sub = $1
+       LIMIT 1`,
+      [googleSub]
     );
-    return toUser({ ...byGoogleSub, email, name, google_sub: googleSub });
+
+    if (byGoogleSub.rowCount) {
+      const updated = await client.query<UserRow>(
+        `UPDATE users
+         SET email = $1,
+             name = $2,
+             updated_at = NOW()
+         WHERE id = $3
+         RETURNING id, email, name`,
+        [email, name, byGoogleSub.rows[0].id]
+      );
+      await client.query("COMMIT");
+      return toUser(updated.rows[0]);
+    }
+
+    const byEmail = await client.query<UserRow>(
+      `SELECT id, email, name
+       FROM users
+       WHERE lower(email) = lower($1)
+       LIMIT 1`,
+      [email]
+    );
+
+    if (byEmail.rowCount) {
+      const existing = byEmail.rows[0];
+      const updated = await client.query<UserRow>(
+        `UPDATE users
+         SET google_sub = $1,
+             name = $2,
+             updated_at = NOW()
+         WHERE id = $3
+         RETURNING id, email, name`,
+        [googleSub, name || existing.name, existing.id]
+      );
+      await client.query("COMMIT");
+      return toUser(updated.rows[0]);
+    }
+
+    const created = await client.query<UserRow>(
+      `INSERT INTO users (email, name, google_sub, updated_at)
+       VALUES ($1, $2, $3, NOW())
+       RETURNING id, email, name`,
+      [email, name, googleSub]
+    );
+
+    await client.query("COMMIT");
+    return toUser(created.rows[0]);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
   }
-
-  const byEmail = db
-    .prepare(`SELECT id, email, name, google_sub FROM users WHERE lower(email) = lower(?)`)
-    .get(email) as UserRow | undefined;
-
-  if (byEmail) {
-    db.prepare(
-      `UPDATE users SET google_sub = ?, name = ?, updated_at = datetime('now') WHERE id = ?`
-    ).run(googleSub, name || byEmail.name, byEmail.id);
-    return toUser({
-      ...byEmail,
-      google_sub: googleSub,
-      name: name || byEmail.name,
-      email: byEmail.email
-    });
-  }
-
-  return createUser({ email, name, googleSub });
 }
 
-export function createSession(userId: number, expiresAt: Date): string {
+export async function createSession(userId: number, expiresAt: Date): Promise<string> {
+  await initialize();
+
   const token = crypto.randomBytes(32).toString("hex");
-  db.prepare(
+  await getPool().query(
     `INSERT INTO sessions (token, user_id, expires_at)
-     VALUES (?, ?, ?)`
-  ).run(token, userId, toSqliteDate(expiresAt));
+     VALUES ($1, $2, $3::timestamptz)`,
+    [token, userId, expiresAt.toISOString()]
+  );
   return token;
 }
 
-export function deleteSession(token: string): void {
-  db.prepare(`DELETE FROM sessions WHERE token = ?`).run(token);
+export async function deleteSession(token: string): Promise<void> {
+  await initialize();
+  await getPool().query(`DELETE FROM sessions WHERE token = $1`, [token]);
 }
 
-export function getUserBySessionToken(token: string): DbUser | null {
-  const row = db
-    .prepare(
-      `SELECT u.id, u.email, u.name, u.google_sub
-       FROM sessions s
-       JOIN users u ON u.id = s.user_id
-       WHERE s.token = ?
-         AND datetime(s.expires_at) > datetime('now')`
-    )
-    .get(token) as UserRow | undefined;
+export async function getUserBySessionToken(token: string): Promise<DbUser | null> {
+  await initialize();
 
-  if (!row) return null;
-  return toUser(row);
+  const result = await getPool().query<UserRow>(
+    `SELECT u.id, u.email, u.name
+     FROM sessions s
+     JOIN users u ON u.id = s.user_id
+     WHERE s.token = $1
+       AND s.expires_at > NOW()
+     LIMIT 1`,
+    [token]
+  );
+
+  if (result.rowCount === 0) return null;
+  return toUser(result.rows[0]);
 }
 
-export function deleteExpiredSessions(): void {
-  db.prepare(`DELETE FROM sessions WHERE datetime(expires_at) <= datetime('now')`).run();
-}
-
-export function initDb(): void {
-  // Importing this module initializes DB + migrations.
+export async function deleteExpiredSessions(): Promise<void> {
+  await initialize();
+  await getPool().query(`DELETE FROM sessions WHERE expires_at <= NOW()`);
 }

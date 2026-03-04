@@ -37,19 +37,19 @@ export function clearSessionCookie(response: NextResponse): void {
   });
 }
 
-export function createUserSession(userId: number): { token: string; expiresAt: Date } {
-  deleteExpiredSessions();
+export async function createUserSession(userId: number): Promise<{ token: string; expiresAt: Date }> {
+  await deleteExpiredSessions();
   const expiresAt = getSessionExpiryDate();
-  const token = createSession(userId, expiresAt);
+  const token = await createSession(userId, expiresAt);
   return { token, expiresAt };
 }
 
-export function destroyCurrentSession(token: string | undefined): void {
+export async function destroyCurrentSession(token: string | undefined): Promise<void> {
   if (!token) return;
-  deleteSession(token);
+  await deleteSession(token);
 }
 
-export function getCurrentUserFromCookies(): DbUser | null {
+export async function getCurrentUserFromCookies(): Promise<DbUser | null> {
   const token = cookies().get(SESSION_COOKIE_NAME)?.value;
   if (!token) return null;
   return getUserBySessionToken(token);

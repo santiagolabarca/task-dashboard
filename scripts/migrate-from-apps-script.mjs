@@ -1,9 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { DatabaseSync } from "node:sqlite";
-
-const root = process.cwd();
+import { Pool } from "pg";
 
 function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return;
@@ -42,8 +40,8 @@ function computeStatusNextStep(dueDateIso, statusFinalOutcome) {
   return "Safe";
 }
 
-loadEnvFile(path.join(root, ".env"));
-loadEnvFile(path.join(root, ".env.local"));
+loadEnvFile(path.join(process.cwd(), ".env"));
+loadEnvFile(path.join(process.cwd(), ".env.local"));
 
 const baseUrl = process.env.NEXT_PUBLIC_APPS_SCRIPT_URL;
 if (!baseUrl) {
@@ -51,108 +49,119 @@ if (!baseUrl) {
   process.exit(1);
 }
 
-const dbPath = process.env.TASK_DB_PATH || "./data/tasks.db";
-const resolvedDbPath = path.resolve(root, dbPath);
-fs.mkdirSync(path.dirname(resolvedDbPath), { recursive: true });
-
-const db = new DatabaseSync(resolvedDbPath);
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL DEFAULT '',
-    google_sub TEXT UNIQUE,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )
-`);
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    to_do TEXT NOT NULL,
-    status_final_outcome TEXT NOT NULL,
-    tipo TEXT NOT NULL,
-    next_step TEXT NOT NULL DEFAULT '',
-    due_date_next_step TEXT NOT NULL,
-    status_next_step TEXT NOT NULL DEFAULT '',
-    user_id INTEGER,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (user_id) REFERENCES users (id)
-  )
-`);
-
-const ownerEmail = String(process.env.DEFAULT_OWNER_EMAIL || "Santiago.labarca@berkeley.edu")
-  .trim()
-  .toLowerCase();
-const ownerName = String(process.env.DEFAULT_OWNER_NAME || "Santiago Labarca").trim();
-
-const existingOwner = db
-  .prepare(`SELECT id FROM users WHERE lower(email) = lower(?)`)
-  .get(ownerEmail);
-
-let ownerUserId;
-if (existingOwner?.id) {
-  ownerUserId = Number(existingOwner.id);
-} else {
-  const ownerResult = db
-    .prepare(
-      `INSERT INTO users (email, name, updated_at)
-       VALUES (?, ?, datetime('now'))`
-    )
-    .run(ownerEmail, ownerName);
-  ownerUserId = Number(ownerResult.lastInsertRowid);
-}
-
-const listUrl = new URL(baseUrl);
-listUrl.searchParams.set("action", "list");
-
-const res = await fetch(listUrl.toString());
-if (!res.ok) {
-  console.error(`Failed to fetch source tasks: ${res.status}`);
+const connectionString = process.env.DATABASE_URL;
+if (!connectionString) {
+  console.error("Missing DATABASE_URL in .env.local");
   process.exit(1);
 }
 
-const data = await res.json();
-const sourceTasks = Array.isArray(data.tasks) ? data.tasks : [];
+const pool = new Pool({
+  connectionString,
+  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined
+});
 
-db.exec("BEGIN");
-try {
-  db.exec("DELETE FROM tasks");
+async function run() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id BIGSERIAL PRIMARY KEY,
+      email TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL DEFAULT '',
+      google_sub TEXT UNIQUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
 
-  const insertStmt = db.prepare(
-    `INSERT INTO tasks (to_do, status_final_outcome, tipo, next_step, due_date_next_step, status_next_step, user_id, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tasks (
+      id BIGSERIAL PRIMARY KEY,
+      user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+      to_do TEXT NOT NULL,
+      status_final_outcome TEXT NOT NULL,
+      tipo TEXT NOT NULL,
+      next_step TEXT NOT NULL DEFAULT '',
+      due_date_next_step DATE NOT NULL,
+      status_next_step TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  const ownerEmail = String(process.env.DEFAULT_OWNER_EMAIL || "Santiago.labarca@berkeley.edu")
+    .trim()
+    .toLowerCase();
+  const ownerName = String(process.env.DEFAULT_OWNER_NAME || "Santiago Labarca").trim();
+
+  const ownerResult = await pool.query(
+    `INSERT INTO users (email, name)
+     VALUES ($1, $2)
+     ON CONFLICT (email)
+     DO UPDATE SET name = COALESCE(NULLIF(EXCLUDED.name, ''), users.name), updated_at = NOW()
+     RETURNING id`,
+    [ownerEmail, ownerName]
   );
 
-  for (const task of sourceTasks) {
-    const toDo = String(task.toDo || "").trim();
-    const statusFinalOutcome = String(task.statusFinalOutcome || "To-do").trim();
-    const tipo = String(task.tipo || "Otros").trim();
-    const nextStep = String(task.nextStep || "").trim();
-    const dueDateNextStep = String(task.dueDateNextStep || "").trim();
-    const statusNextStep =
-      String(task.statusNextStep || "").trim() ||
-      computeStatusNextStep(dueDateNextStep, statusFinalOutcome);
+  const ownerUserId = Number(ownerResult.rows[0].id);
 
-    insertStmt.run(
-      toDo,
-      statusFinalOutcome,
-      tipo,
-      nextStep,
-      dueDateNextStep,
-      statusNextStep,
-      ownerUserId
-    );
+  const listUrl = new URL(baseUrl);
+  listUrl.searchParams.set("action", "list");
+
+  const res = await fetch(listUrl.toString());
+  if (!res.ok) {
+    throw new Error(`Failed to fetch source tasks: ${res.status}`);
   }
 
-  db.exec("COMMIT");
-} catch (error) {
-  db.exec("ROLLBACK");
-  throw error;
-} finally {
-  db.close();
+  const data = await res.json();
+  const sourceTasks = Array.isArray(data.tasks) ? data.tasks : [];
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`DELETE FROM tasks WHERE user_id = $1`, [ownerUserId]);
+
+    for (const task of sourceTasks) {
+      const toDo = String(task.toDo || "").trim();
+      const statusFinalOutcome = String(task.statusFinalOutcome || "To-do").trim();
+      const tipo = String(task.tipo || "Otros").trim();
+      const nextStep = String(task.nextStep || "").trim();
+      const dueDateNextStep = String(task.dueDateNextStep || "").trim();
+      const statusNextStep =
+        String(task.statusNextStep || "").trim() ||
+        computeStatusNextStep(dueDateNextStep, statusFinalOutcome);
+
+      if (!toDo || !dueDateNextStep) continue;
+
+      await client.query(
+        `INSERT INTO tasks (user_id, to_do, status_final_outcome, tipo, next_step, due_date_next_step, status_next_step, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6::date, $7, NOW())`,
+        [
+          ownerUserId,
+          toDo,
+          statusFinalOutcome,
+          tipo,
+          nextStep,
+          dueDateNextStep,
+          statusNextStep
+        ]
+      );
+    }
+
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  console.log(`Migrated ${sourceTasks.length} tasks into Postgres.`);
 }
 
-console.log(`Migrated ${sourceTasks.length} tasks into local SQLite DB.`);
+run()
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await pool.end();
+  });
