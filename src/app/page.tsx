@@ -116,15 +116,58 @@ function normalizeTaskPatch(patch: TaskPatch): TaskPatch {
   return Object.fromEntries(entries) as TaskPatch;
 }
 
-function outcomeBadgeVariant(status: string): "default" | "done" | "warning" {
-  if (normalizeStatus(status) === "Done") return "done";
-  if (normalizeStatus(status) === "On hold") return "warning";
-  return "default";
-}
-
 function normalizeStatus(status: string): string {
   if (status === "On-hold") return "On hold";
   return status;
+}
+
+function normalizeTipoKey(tipo: string): string {
+  return String(tipo || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function tipoBadgeClass(tipo: string): string {
+  const key = normalizeTipoKey(tipo);
+  if (key === "finances" || key === "finanzas") return "bg-emerald-100 text-emerald-800";
+  if (key === "others" || key === "otros") return "bg-slate-200 text-slate-800";
+  if (key === "university" || key === "clases") return "bg-violet-100 text-violet-800";
+  if (key === "job" || key === "recruiting") return "bg-indigo-100 text-indigo-800";
+  if (key === "personal") return "bg-pink-100 text-pink-800";
+  if (key === "household") return "bg-orange-100 text-orange-800";
+  return "bg-cyan-100 text-cyan-800";
+}
+
+function statusBadgeClass(status: string): string {
+  const normalized = normalizeStatus(status);
+  if (normalized === "To-do") return "bg-red-100 text-red-800";
+  if (normalized === "On-going") return "bg-blue-100 text-blue-800";
+  if (normalized === "On hold") return "bg-amber-100 text-amber-900";
+  if (normalized === "Done") return "bg-emerald-100 text-emerald-800";
+  return "bg-slate-200 text-slate-800";
+}
+
+function cardDueTintClass(dueDate: string, today: string): string {
+  if (!dueDate) return "bg-white";
+  const due = new Date(`${dueDate}T00:00:00`);
+  const base = new Date(`${today}T00:00:00`);
+  if (Number.isNaN(due.getTime()) || Number.isNaN(base.getTime())) return "bg-white";
+
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const deltaDays = Math.floor((due.getTime() - base.getTime()) / msPerDay);
+
+  if (deltaDays === 0) return "bg-white";
+  if (deltaDays < 0) {
+    if (deltaDays <= -14) return "bg-red-100";
+    if (deltaDays <= -7) return "bg-red-50";
+    return "bg-rose-50";
+  }
+
+  if (deltaDays >= 14) return "bg-emerald-100";
+  if (deltaDays >= 7) return "bg-emerald-50";
+  return "bg-green-50";
 }
 
 function taskSearchText(task: Task): string {
@@ -1147,15 +1190,28 @@ export default function HomePage() {
                   return (
                     <article
                       key={task.rowId}
-                      className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
+                      className={`rounded-2xl border border-slate-200 p-4 shadow-sm ${cardDueTintClass(
+                        task.dueDateNextStep,
+                        today
+                      )}`}
                     >
                       <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
                         <h3 className="text-base font-semibold text-slate-900">{task.toDo}</h3>
                         <div className="flex flex-wrap gap-2">
-                          <Badge>{task.tipo || "Otros"}</Badge>
-                          <Badge variant={outcomeBadgeVariant(task.statusFinalOutcome)}>
+                          <span
+                            className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${tipoBadgeClass(
+                              task.tipo || "Others"
+                            )}`}
+                          >
+                            {task.tipo || "Others"}
+                          </span>
+                          <span
+                            className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${statusBadgeClass(
+                              task.statusFinalOutcome || "To-do"
+                            )}`}
+                          >
                             {task.statusFinalOutcome || "To-do"}
-                          </Badge>
+                          </span>
                         </div>
                       </div>
 
@@ -1222,11 +1278,20 @@ export default function HomePage() {
                               return (
                                 <article
                                   key={task.rowId}
-                                  className="rounded-xl border border-slate-200 bg-slate-50 p-3"
+                                  className={`rounded-xl border border-slate-200 p-3 ${cardDueTintClass(
+                                    task.dueDateNextStep,
+                                    today
+                                  )}`}
                                 >
                                   <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
                                     <h4 className="text-sm font-semibold text-slate-900">{task.toDo}</h4>
-                                    <Badge>{task.tipo || "Otros"}</Badge>
+                                    <span
+                                      className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${tipoBadgeClass(
+                                        task.tipo || "Others"
+                                      )}`}
+                                    >
+                                      {task.tipo || "Others"}
+                                    </span>
                                   </div>
                                   <p className="text-xs text-slate-700">
                                     Due:{" "}
@@ -1237,7 +1302,14 @@ export default function HomePage() {
                                     </span>
                                   </p>
                                   <p className="mt-1 text-xs text-slate-700">
-                                    Status: {task.statusFinalOutcome || "To-do"}
+                                    Status:{" "}
+                                    <span
+                                      className={`inline-flex items-center rounded-full px-2 py-0.5 font-medium ${statusBadgeClass(
+                                        task.statusFinalOutcome || "To-do"
+                                      )}`}
+                                    >
+                                      {task.statusFinalOutcome || "To-do"}
+                                    </span>
                                   </p>
                                   <p className="mt-1 text-xs text-slate-700">
                                     Next step status: {task.statusNextStep || "-"}
