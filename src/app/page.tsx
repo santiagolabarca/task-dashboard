@@ -8,7 +8,16 @@ import { Modal } from "@/components/ui/Modal";
 import { Select } from "@/components/ui/Select";
 import { Tabs } from "@/components/ui/Tabs";
 import { Toast } from "@/components/ui/Toast";
-import { addTask, getCurrentUser, listTasks, logoutUser, signInWithGoogle, updateTask } from "@/lib/api";
+import {
+  addTask,
+  getCurrentUser,
+  getUserPreferences,
+  listTasks,
+  logoutUser,
+  saveUserPreferences,
+  signInWithGoogle,
+  updateTask
+} from "@/lib/api";
 import {
   addDaysToIsoDate,
   compareIsoDates,
@@ -18,10 +27,11 @@ import {
 import {
   AddTaskPayload,
   AuthUser,
+  ONBOARDING_SUGGESTED_TIPOS,
   STATUS_FINAL_OUTCOME_OPTIONS,
   Task,
   TaskPatch,
-  TIPO_OPTIONS
+  UserPreferences
 } from "@/lib/types";
 
 declare global {
@@ -65,15 +75,40 @@ const CANVAS_COLUMNS: Array<{ id: CanvasColumnId; label: string; accent: string 
   { id: "no_due", label: "No Due Date", accent: "border-slate-300" }
 ];
 
-function defaultFormValues(): AddTaskPayload {
+function defaultFormValues(tipo = "Others"): AddTaskPayload {
   return {
     toDo: "",
     statusFinalOutcome: "To-do",
-    tipo: "Otros",
+    tipo,
     nextStep: "",
     dueDateNextStep: todayIsoDate(),
     statusNextStep: ""
   };
+}
+
+function normalizeTipoOptions(options: string[]): string[] {
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of options) {
+    const value = String(raw || "").trim();
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(value);
+  }
+  return output;
+}
+
+function normalizeDateInput(value: string): string {
+  const raw = String(value || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const ddmmyyyy = raw.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
+  if (ddmmyyyy) {
+    const [, dd, mm, yyyy] = ddmmyyyy;
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  return raw;
 }
 
 function normalizeTaskPatch(patch: TaskPatch): TaskPatch {
@@ -149,13 +184,20 @@ export default function HomePage() {
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [isSigningIn, setIsSigningIn] = useState(false);
+  const [isPreferencesLoading, setIsPreferencesLoading] = useState(false);
+  const [userPreferences, setUserPreferences] = useState<UserPreferences | null>(null);
+  const [userTipoOptions, setUserTipoOptions] = useState<string[]>([]);
+  const [needsOnboarding, setNeedsOnboarding] = useState(false);
+  const [onboardingSelection, setOnboardingSelection] = useState<string[]>([]);
+  const [onboardingCustom, setOnboardingCustom] = useState("");
+  const [isSavingOnboarding, setIsSavingOnboarding] = useState(false);
 
   const [tab, setTab] = useState<TabValue>("dashboard");
   const [tasks, setTasks] = useState<Task[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [form, setForm] = useState<AddTaskPayload>(defaultFormValues);
+  const [form, setForm] = useState<AddTaskPayload>(() => defaultFormValues());
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("open");
@@ -204,6 +246,38 @@ export default function HomePage() {
   useEffect(() => {
     void refreshCurrentUser();
   }, [refreshCurrentUser]);
+
+  const loadUserPreferences = useCallback(async () => {
+    if (!currentUser) {
+      setUserPreferences(null);
+      setUserTipoOptions([]);
+      setNeedsOnboarding(false);
+      return;
+    }
+
+    setIsPreferencesLoading(true);
+    try {
+      const preferences = await getUserPreferences();
+      const tipoOptions = normalizeTipoOptions(preferences.tipoOptions);
+      const resolvedOptions =
+        tipoOptions.length > 0 ? tipoOptions : normalizeTipoOptions([...ONBOARDING_SUGGESTED_TIPOS]);
+
+      setUserPreferences(preferences);
+      setUserTipoOptions(resolvedOptions);
+      setNeedsOnboarding(!preferences.onboardingCompleted);
+      setOnboardingSelection(preferences.onboardingCompleted ? resolvedOptions : []);
+      setForm((current) => ({
+        ...current,
+        tipo: resolvedOptions.includes(current.tipo) ? current.tipo : resolvedOptions[0] || "Others"
+      }));
+    } catch (preferencesError) {
+      setError(
+        preferencesError instanceof Error ? preferencesError.message : "Failed to load user preferences."
+      );
+    } finally {
+      setIsPreferencesLoading(false);
+    }
+  }, [currentUser]);
 
   const onGoogleCredential = useCallback(
     async (response: { credential?: string }) => {
@@ -270,6 +344,17 @@ export default function HomePage() {
     };
   }, [currentUser, googleClientId, isAuthLoading, onGoogleCredential]);
 
+  useEffect(() => {
+    if (!isAuthLoading && currentUser) {
+      void loadUserPreferences();
+    }
+    if (!isAuthLoading && !currentUser) {
+      setUserPreferences(null);
+      setUserTipoOptions([]);
+      setNeedsOnboarding(false);
+    }
+  }, [currentUser, isAuthLoading, loadUserPreferences]);
+
   const loadTasks = useCallback(async () => {
     if (!currentUser) {
       setTasks([]);
@@ -307,6 +392,12 @@ export default function HomePage() {
   const today = todayIsoDate();
   const tomorrow = addDaysToIsoDate(today, 1);
   const weekEnd = endOfWeekIsoDate(today);
+
+  const availableTipoOptions = useMemo(() => {
+    const fromTasks = tasks.map((task) => task.tipo).filter(Boolean);
+    const fromPreferences = userTipoOptions;
+    return normalizeTipoOptions([...fromPreferences, ...fromTasks]);
+  }, [tasks, userTipoOptions]);
 
   const baseFilteredTasks = useMemo(() => {
     const matches = (task: Task): boolean => {
@@ -451,18 +542,19 @@ export default function HomePage() {
     event.preventDefault();
     setError(null);
 
+    const normalizedDueDate = normalizeDateInput(form.dueDateNextStep);
     const payload: AddTaskPayload = {
       toDo: form.toDo.trim(),
       statusFinalOutcome: form.statusFinalOutcome,
-      tipo: form.tipo,
+      tipo: form.tipo || userTipoOptions[0] || "Others",
       nextStep: form.nextStep.trim(),
-      dueDateNextStep: form.dueDateNextStep,
+      dueDateNextStep: normalizedDueDate,
       // This field is formula-driven in Sheets and should not be manually set on add.
       statusNextStep: ""
     };
 
-    if (!payload.toDo || !payload.dueDateNextStep) {
-      setError("To do and due date are required.");
+    if (!payload.toDo || !payload.dueDateNextStep || !/^\d{4}-\d{2}-\d{2}$/.test(payload.dueDateNextStep)) {
+      setError("To do and due date are required. Use YYYY-MM-DD date format.");
       return;
     }
 
@@ -482,7 +574,7 @@ export default function HomePage() {
             : task
         )
       );
-      setForm(defaultFormValues());
+      setForm(defaultFormValues(userTipoOptions[0] || "Others"));
       pushToast("Added", "success");
       await loadTasks();
     } catch (addError) {
@@ -513,7 +605,56 @@ export default function HomePage() {
     setCurrentUser(null);
     setTasks([]);
     setError(null);
+    setUserTipoOptions([]);
+    setUserPreferences(null);
+    setNeedsOnboarding(false);
     setTab("dashboard");
+  };
+
+  const toggleOnboardingTipo = (tipo: string) => {
+    setOnboardingSelection((current) => {
+      const exists = current.some((item) => item.toLowerCase() === tipo.toLowerCase());
+      if (exists) {
+        return current.filter((item) => item.toLowerCase() !== tipo.toLowerCase());
+      }
+      return [...current, tipo];
+    });
+  };
+
+  const addCustomOnboardingTipo = () => {
+    const custom = onboardingCustom.trim();
+    if (!custom) return;
+    setOnboardingCustom("");
+    setOnboardingSelection((current) => normalizeTipoOptions([...current, custom]));
+  };
+
+  const completeOnboarding = async () => {
+    const finalOptions = normalizeTipoOptions([...onboardingSelection, onboardingCustom.trim()]);
+    if (finalOptions.length === 0) {
+      setError("Select at least one task type to continue.");
+      return;
+    }
+
+    setIsSavingOnboarding(true);
+    setError(null);
+    try {
+      const preferences = await saveUserPreferences(finalOptions);
+      setUserPreferences(preferences);
+      setUserTipoOptions(preferences.tipoOptions);
+      setNeedsOnboarding(false);
+      setOnboardingCustom("");
+      setForm((current) => ({
+        ...current,
+        tipo: preferences.tipoOptions.includes(current.tipo)
+          ? current.tipo
+          : preferences.tipoOptions[0] || "Others"
+      }));
+      pushToast("Preferences saved", "success");
+    } catch (onboardingError) {
+      setError(onboardingError instanceof Error ? onboardingError.message : "Failed to save preferences.");
+    } finally {
+      setIsSavingOnboarding(false);
+    }
   };
 
   const handleMoveTomorrow = async (task: Task) => {
@@ -526,7 +667,7 @@ export default function HomePage() {
     setEditForm({
       toDo: task.toDo,
       statusFinalOutcome: task.statusFinalOutcome || "To-do",
-      tipo: task.tipo || "Otros",
+      tipo: task.tipo || availableTipoOptions[0] || "Others",
       nextStep: task.nextStep || "",
       dueDateNextStep: task.dueDateNextStep || today,
       statusNextStep: task.statusNextStep || ""
@@ -609,6 +750,108 @@ export default function HomePage() {
     );
   }
 
+  if (isPreferencesLoading) {
+    return (
+      <main className="min-h-screen px-4 py-8 sm:px-6 lg:px-8">
+        <div className="mx-auto w-full max-w-6xl space-y-6">
+          <header className="space-y-2">
+            <h1 className="text-2xl font-semibold text-slate-900 sm:text-3xl">Task Dashboard</h1>
+            <p className="text-sm text-slate-600">Loading your preferences...</p>
+          </header>
+        </div>
+      </main>
+    );
+  }
+
+  if (needsOnboarding) {
+    const suggested = [...ONBOARDING_SUGGESTED_TIPOS];
+    return (
+      <main className="min-h-screen px-4 py-8 sm:px-6 lg:px-8">
+        <div className="mx-auto w-full max-w-6xl space-y-6">
+          <header className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-2">
+              <h1 className="text-2xl font-semibold text-slate-900 sm:text-3xl">Task Dashboard</h1>
+              <p className="text-sm text-slate-600">
+                Pick your task types so your workspace matches your workflow.
+              </p>
+            </div>
+            <Button variant="ghost" onClick={() => void handleLogout()}>
+              Log out
+            </Button>
+          </header>
+
+          {error && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+              {error}
+            </div>
+          )}
+
+          <section className="max-w-3xl rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-semibold text-slate-900">Onboarding</h2>
+            <p className="mt-1 text-sm text-slate-600">
+              Select the task types you want. You can customize this later.
+            </p>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              {suggested.map((tipo) => {
+                const selected = onboardingSelection.some(
+                  (option) => option.toLowerCase() === tipo.toLowerCase()
+                );
+                return (
+                  <button
+                    key={tipo}
+                    type="button"
+                    className={`rounded-full border px-3 py-1.5 text-sm ${
+                      selected
+                        ? "border-brand-500 bg-brand-100 text-brand-800"
+                        : "border-slate-300 bg-white text-slate-700"
+                    }`}
+                    onClick={() => toggleOnboardingTipo(tipo)}
+                  >
+                    {tipo}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-4 flex gap-2">
+              <Input
+                value={onboardingCustom}
+                onChange={(event) => setOnboardingCustom(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    addCustomOnboardingTipo();
+                  }
+                }}
+                placeholder="Add custom type (e.g., Health)"
+              />
+              <Button type="button" variant="secondary" onClick={addCustomOnboardingTipo}>
+                Add
+              </Button>
+            </div>
+
+            {onboardingSelection.length > 0 && (
+              <div className="mt-4 flex flex-wrap gap-2">
+                {onboardingSelection.map((tipo) => (
+                  <Badge key={tipo}>{tipo}</Badge>
+                ))}
+              </div>
+            )}
+
+            <div className="mt-6 flex justify-end">
+              <Button onClick={() => void completeOnboarding()} disabled={isSavingOnboarding}>
+                {isSavingOnboarding ? "Saving..." : "Continue"}
+              </Button>
+            </div>
+          </section>
+        </div>
+      </main>
+    );
+  }
+
+  const configuredTipoCount = userPreferences?.tipoOptions?.length ?? userTipoOptions.length;
+
   return (
     <main className="min-h-screen px-4 py-8 sm:px-6 lg:px-8">
       <div className="mx-auto w-full max-w-6xl space-y-6">
@@ -616,7 +859,7 @@ export default function HomePage() {
           <div className="space-y-2">
             <h1 className="text-2xl font-semibold text-slate-900 sm:text-3xl">Task Dashboard</h1>
             <p className="text-sm text-slate-600">
-              Local-first dashboard with private task spaces per user.
+              Private task spaces per user. You currently have {configuredTipoCount} task type options.
             </p>
           </div>
           <div className="flex items-center gap-3">
@@ -681,7 +924,7 @@ export default function HomePage() {
                   value={form.tipo}
                   onChange={(event) => setForm((current) => ({ ...current, tipo: event.target.value }))}
                 >
-                  {TIPO_OPTIONS.map((tipo) => (
+                  {availableTipoOptions.map((tipo) => (
                     <option key={tipo} value={tipo}>
                       {tipo}
                     </option>
@@ -813,7 +1056,7 @@ export default function HomePage() {
                   <span className="text-sm font-medium text-slate-700">Tipo</span>
                   <Select value={tipoFilter} onChange={(event) => setTipoFilter(event.target.value)}>
                     <option value="all">All</option>
-                    {TIPO_OPTIONS.map((tipo) => (
+                    {availableTipoOptions.map((tipo) => (
                       <option key={tipo} value={tipo}>
                         {tipo}
                       </option>
@@ -1077,7 +1320,7 @@ export default function HomePage() {
                   setEditForm((current) => (current ? { ...current, tipo: event.target.value } : current))
                 }
               >
-                {TIPO_OPTIONS.map((tipo) => (
+                {availableTipoOptions.map((tipo) => (
                   <option key={tipo} value={tipo}>
                     {tipo}
                   </option>

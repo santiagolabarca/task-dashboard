@@ -14,6 +14,15 @@ export const TIPO_OPTIONS = [
   "Personal"
 ] as const;
 
+export const ONBOARDING_SUGGESTED_TIPOS = [
+  "Finances",
+  "Others",
+  "University",
+  "Job",
+  "Personal",
+  "Household"
+] as const;
+
 export type StatusFinalOutcome = (typeof STATUS_FINAL_OUTCOME_OPTIONS)[number];
 export type Tipo = (typeof TIPO_OPTIONS)[number];
 
@@ -58,4 +67,9 @@ export type AuthMeResponse = {
 export type AuthGoogleResponse = {
   ok: boolean;
   user: AuthUser;
+};
+
+export type UserPreferences = {
+  onboardingCompleted: boolean;
+  tipoOptions: string[];
 };

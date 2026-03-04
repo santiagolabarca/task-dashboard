@@ -17,6 +17,11 @@ type UserRow = {
   name: string;
 };
 
+type UserPreferencesRow = {
+  onboarding_completed: boolean;
+  tipo_options: string[] | null;
+};
+
 export type DbTask = {
   rowId: number;
   toDo: string;
@@ -32,6 +37,20 @@ export type DbUser = {
   email: string;
   name: string;
 };
+
+export type DbUserPreferences = {
+  onboardingCompleted: boolean;
+  tipoOptions: string[];
+};
+
+const DEFAULT_USER_TIPO_OPTIONS = [
+  "Finances",
+  "Others",
+  "University",
+  "Job",
+  "Personal",
+  "Household"
+];
 
 declare global {
   // eslint-disable-next-line no-var
@@ -79,6 +98,32 @@ function toUser(row: UserRow): DbUser {
   };
 }
 
+function normalizeTipoOptions(options: string[]): string[] {
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of options) {
+    const value = String(raw || "").trim();
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(value);
+  }
+  return output;
+}
+
+async function getDistinctTaskTiposByUser(userId: number): Promise<string[]> {
+  const result = await getPool().query<{ tipo: string }>(
+    `SELECT DISTINCT tipo
+     FROM tasks
+     WHERE user_id = $1
+       AND NULLIF(BTRIM(tipo), '') IS NOT NULL
+     ORDER BY tipo ASC`,
+    [userId]
+  );
+  return normalizeTipoOptions(result.rows.map((row) => row.tipo));
+}
+
 async function ensureOwnerUserAndBackfill(pool: Pool): Promise<void> {
   const ownerEmail = (process.env.DEFAULT_OWNER_EMAIL || "Santiago.labarca@berkeley.edu")
     .trim()
@@ -113,10 +158,21 @@ async function initialize(): Promise<void> {
           email TEXT NOT NULL UNIQUE,
           name TEXT NOT NULL DEFAULT '',
           google_sub TEXT UNIQUE,
+          onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE,
+          tipo_options TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `);
+
+      await pool.query(
+        `ALTER TABLE users
+         ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE`
+      );
+      await pool.query(
+        `ALTER TABLE users
+         ADD COLUMN IF NOT EXISTS tipo_options TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]`
+      );
 
       await pool.query(`
         CREATE TABLE IF NOT EXISTS sessions (
@@ -320,6 +376,87 @@ export async function getUserById(id: number): Promise<DbUser | null> {
 
   if (result.rowCount === 0) return null;
   return toUser(result.rows[0]);
+}
+
+export async function getUserPreferencesByUserId(userId: number): Promise<DbUserPreferences> {
+  await initialize();
+
+  const result = await getPool().query<UserPreferencesRow>(
+    `SELECT onboarding_completed, tipo_options
+     FROM users
+     WHERE id = $1
+     LIMIT 1`,
+    [userId]
+  );
+
+  if (result.rowCount === 0) {
+    throw new Error("User not found");
+  }
+
+  const row = result.rows[0];
+  let tipoOptions = normalizeTipoOptions(row.tipo_options || []);
+  let onboardingCompleted = Boolean(row.onboarding_completed);
+
+  if (tipoOptions.length === 0) {
+    tipoOptions = await getDistinctTaskTiposByUser(userId);
+    if (tipoOptions.length === 0) {
+      tipoOptions = [...DEFAULT_USER_TIPO_OPTIONS];
+    }
+  }
+
+  if (!onboardingCompleted) {
+    const existingTaskTipos = await getDistinctTaskTiposByUser(userId);
+    if (existingTaskTipos.length > 0) {
+      onboardingCompleted = true;
+      if (tipoOptions.length === 0) {
+        tipoOptions = existingTaskTipos;
+      }
+    }
+  }
+
+  await getPool().query(
+    `UPDATE users
+     SET onboarding_completed = $1,
+         tipo_options = $2::text[],
+         updated_at = NOW()
+     WHERE id = $3`,
+    [onboardingCompleted, tipoOptions, userId]
+  );
+
+  return {
+    onboardingCompleted,
+    tipoOptions
+  };
+}
+
+export async function saveUserPreferencesByUserId(
+  userId: number,
+  tipoOptions: string[]
+): Promise<DbUserPreferences> {
+  await initialize();
+  const normalized = normalizeTipoOptions(tipoOptions);
+  if (normalized.length === 0) {
+    throw new Error("At least one task type is required");
+  }
+
+  const result = await getPool().query<UserPreferencesRow>(
+    `UPDATE users
+     SET onboarding_completed = TRUE,
+         tipo_options = $1::text[],
+         updated_at = NOW()
+     WHERE id = $2
+     RETURNING onboarding_completed, tipo_options`,
+    [normalized, userId]
+  );
+
+  if (result.rowCount === 0) {
+    throw new Error("User not found");
+  }
+
+  return {
+    onboardingCompleted: Boolean(result.rows[0].onboarding_completed),
+    tipoOptions: normalizeTipoOptions(result.rows[0].tipo_options || [])
+  };
 }
 
 export async function createUser(input: {

@@ -5,6 +5,23 @@ import { getCurrentUserFromCookies } from "@/lib/server/auth";
 
 export const runtime = "nodejs";
 
+function normalizeDateInput(value: string): string | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    return raw;
+  }
+
+  const ddmmyyyy = raw.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
+  if (ddmmyyyy) {
+    const [, dd, mm, yyyy] = ddmmyyyy;
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  return null;
+}
+
 export async function PATCH(
   request: NextRequest,
   context: { params: { id: string } }
@@ -46,7 +63,7 @@ export async function PATCH(
       nextStep: patch.nextStep !== undefined ? String(patch.nextStep).trim() : existing.nextStep,
       dueDateNextStep:
         patch.dueDateNextStep !== undefined
-          ? String(patch.dueDateNextStep).trim()
+          ? normalizeDateInput(String(patch.dueDateNextStep || "")) || existing.dueDateNextStep
           : existing.dueDateNextStep
     };
 

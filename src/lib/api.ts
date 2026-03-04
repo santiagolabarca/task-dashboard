@@ -7,6 +7,7 @@ import {
   ListTasksResponse,
   Task,
   TaskPatch,
+  UserPreferences,
   UpdateTaskResponse
 } from "@/lib/types";
 
@@ -108,4 +109,23 @@ export async function logoutUser(): Promise<void> {
     method: "POST"
   });
   await parseJsonOrThrow<{ ok: boolean }>(response);
+}
+
+export async function getUserPreferences(): Promise<UserPreferences> {
+  const response = await fetch("/api/user/preferences", {
+    method: "GET",
+    cache: "no-store"
+  });
+  return parseJsonOrThrow<UserPreferences>(response);
+}
+
+export async function saveUserPreferences(tipoOptions: string[]): Promise<UserPreferences> {
+  const response = await fetch("/api/user/preferences", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ tipoOptions })
+  });
+  return parseJsonOrThrow<UserPreferences>(response);
 }

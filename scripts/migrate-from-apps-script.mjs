@@ -67,10 +67,21 @@ async function run() {
       email TEXT NOT NULL UNIQUE,
       name TEXT NOT NULL DEFAULT '',
       google_sub TEXT UNIQUE,
+      onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE,
+      tipo_options TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+
+  await pool.query(
+    `ALTER TABLE users
+     ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE`
+  );
+  await pool.query(
+    `ALTER TABLE users
+     ADD COLUMN IF NOT EXISTS tipo_options TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]`
+  );
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS tasks (
@@ -96,7 +107,10 @@ async function run() {
     `INSERT INTO users (email, name)
      VALUES ($1, $2)
      ON CONFLICT (email)
-     DO UPDATE SET name = COALESCE(NULLIF(EXCLUDED.name, ''), users.name), updated_at = NOW()
+     DO UPDATE SET
+       name = COALESCE(NULLIF(EXCLUDED.name, ''), users.name),
+       onboarding_completed = TRUE,
+       updated_at = NOW()
      RETURNING id`,
     [ownerEmail, ownerName]
   );
