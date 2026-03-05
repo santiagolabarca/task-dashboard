@@ -30,8 +30,7 @@ import {
   ONBOARDING_SUGGESTED_TIPOS,
   STATUS_FINAL_OUTCOME_OPTIONS,
   Task,
-  TaskPatch,
-  UserPreferences
+  TaskPatch
 } from "@/lib/types";
 
 declare global {
@@ -222,13 +221,14 @@ function getCanvasColumnId(task: Task, today: string, tomorrow: string, weekEnd:
 
 export default function HomePage() {
   const googleButtonRef = useRef<HTMLDivElement | null>(null);
+  const addTaskTitleRef = useRef<HTMLInputElement | null>(null);
   const googleClientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
 
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isPreferencesLoading, setIsPreferencesLoading] = useState(false);
-  const [userPreferences, setUserPreferences] = useState<UserPreferences | null>(null);
+  const [, setUserPreferences] = useState<unknown>(null);
   const [userTipoOptions, setUserTipoOptions] = useState<string[]>([]);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [onboardingSelection, setOnboardingSelection] = useState<string[]>([]);
@@ -588,9 +588,9 @@ export default function HomePage() {
     const normalizedDueDate = normalizeDateInput(form.dueDateNextStep);
     const payload: AddTaskPayload = {
       toDo: form.toDo.trim(),
-      statusFinalOutcome: form.statusFinalOutcome,
+      statusFinalOutcome: "To-do",
       tipo: form.tipo || userTipoOptions[0] || "Others",
-      nextStep: form.nextStep.trim(),
+      nextStep: "",
       dueDateNextStep: normalizedDueDate,
       // This field is formula-driven in Sheets and should not be manually set on add.
       statusNextStep: ""
@@ -618,6 +618,7 @@ export default function HomePage() {
         )
       );
       setForm(defaultFormValues(userTipoOptions[0] || "Others"));
+      requestAnimationFrame(() => addTaskTitleRef.current?.focus());
       pushToast("Added", "success");
       await loadTasks();
     } catch (addError) {
@@ -893,17 +894,12 @@ export default function HomePage() {
     );
   }
 
-  const configuredTipoCount = userPreferences?.tipoOptions?.length ?? userTipoOptions.length;
-
   return (
     <main className="min-h-screen px-4 py-8 sm:px-6 lg:px-8">
       <div className="mx-auto w-full max-w-6xl space-y-6">
         <header className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-2">
             <h1 className="text-2xl font-semibold text-slate-900 sm:text-3xl">Task Dashboard</h1>
-            <p className="text-sm text-slate-600">
-              Private task spaces per user. You currently have {configuredTipoCount} task type options.
-            </p>
           </div>
           <div className="flex items-center gap-3">
             <div className="text-right text-sm text-slate-600">
@@ -934,31 +930,18 @@ export default function HomePage() {
         {tab === "add" ? (
           <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
             <h2 className="mb-4 text-lg font-semibold text-slate-900">Add Task</h2>
-            <form className="grid grid-cols-1 gap-4 md:grid-cols-2" onSubmit={onAddSubmit}>
-              <label className="space-y-1 md:col-span-2">
+            <p className="mb-4 text-sm text-slate-600">Quick add: title, type, and due date.</p>
+            <form className="grid grid-cols-1 gap-4 md:grid-cols-3" onSubmit={onAddSubmit}>
+              <label className="space-y-1 md:col-span-3">
                 <span className="text-sm font-medium text-slate-700">To do *</span>
                 <Input
+                  ref={addTaskTitleRef}
+                  autoFocus
                   required
                   value={form.toDo}
                   onChange={(event) => setForm((current) => ({ ...current, toDo: event.target.value }))}
-                  placeholder="Describe the task"
+                  placeholder="Describe the task (e.g., Follow up with Company X)"
                 />
-              </label>
-
-              <label className="space-y-1">
-                <span className="text-sm font-medium text-slate-700">Status Final outcome</span>
-                <Select
-                  value={form.statusFinalOutcome}
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, statusFinalOutcome: event.target.value }))
-                  }
-                >
-                  {STATUS_FINAL_OUTCOME_OPTIONS.map((status) => (
-                    <option key={status} value={status}>
-                      {status}
-                    </option>
-                  ))}
-                </Select>
               </label>
 
               <label className="space-y-1">
@@ -975,15 +958,6 @@ export default function HomePage() {
                 </Select>
               </label>
 
-              <label className="space-y-1 md:col-span-2">
-                <span className="text-sm font-medium text-slate-700">Next step</span>
-                <Input
-                  value={form.nextStep}
-                  onChange={(event) => setForm((current) => ({ ...current, nextStep: event.target.value }))}
-                  placeholder="Optional"
-                />
-              </label>
-
               <label className="space-y-1">
                 <span className="text-sm font-medium text-slate-700">Due date for next step *</span>
                 <Input
@@ -996,7 +970,7 @@ export default function HomePage() {
                 />
               </label>
 
-              <div className="md:col-span-2 flex justify-end">
+              <div className="md:col-span-3 flex justify-end">
                 <Button type="submit" disabled={isSubmitting}>
                   {isSubmitting ? "Adding..." : "Add task"}
                 </Button>
