@@ -148,7 +148,7 @@ function statusBadgeClass(status: string): string {
   return "bg-slate-200 text-slate-800";
 }
 
-function cardDueTintClass(dueDate: string, today: string): string {
+function cardDueTintClass(dueDate: string, today: string, statusFinalOutcome: string): string {
   if (!dueDate) return "bg-white";
   const due = new Date(`${dueDate}T00:00:00`);
   const base = new Date(`${today}T00:00:00`);
@@ -156,9 +156,15 @@ function cardDueTintClass(dueDate: string, today: string): string {
 
   const msPerDay = 24 * 60 * 60 * 1000;
   const deltaDays = Math.floor((due.getTime() - base.getTime()) / msPerDay);
+  const normalizedStatus = normalizeStatus(statusFinalOutcome);
 
   if (deltaDays === 0) return "bg-white";
   if (deltaDays < 0) {
+    if (normalizedStatus === "On-going") {
+      if (deltaDays <= -14) return "bg-blue-100";
+      if (deltaDays <= -7) return "bg-blue-50";
+      return "bg-sky-50";
+    }
     if (deltaDays <= -14) return "bg-red-100";
     if (deltaDays <= -7) return "bg-red-50";
     return "bg-rose-50";
@@ -1166,7 +1172,8 @@ export default function HomePage() {
                       key={task.rowId}
                       className={`rounded-2xl border border-slate-200 p-4 shadow-sm ${cardDueTintClass(
                         task.dueDateNextStep,
-                        today
+                        today,
+                        task.statusFinalOutcome
                       )}`}
                     >
                       <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
@@ -1254,7 +1261,8 @@ export default function HomePage() {
                                   key={task.rowId}
                                   className={`rounded-xl border border-slate-200 p-3 ${cardDueTintClass(
                                     task.dueDateNextStep,
-                                    today
+                                    today,
+                                    task.statusFinalOutcome
                                   )}`}
                                 >
                                   <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
