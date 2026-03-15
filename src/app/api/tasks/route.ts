@@ -50,6 +50,8 @@ export async function POST(request: NextRequest) {
       tipo?: string;
       nextStep?: string;
       dueDateNextStep?: string;
+      recurrenceInterval?: number | null;
+      recurrenceUnit?: "day" | "week" | "month" | null;
     };
 
     const toDo = String(body.toDo || "").trim();
@@ -57,6 +59,17 @@ export async function POST(request: NextRequest) {
     const tipo = String(body.tipo || "Otros").trim();
     const nextStep = String(body.nextStep || "").trim();
     const dueDateNextStep = normalizeDateInput(String(body.dueDateNextStep || ""));
+    const parsedRecurrence = Number(body.recurrenceInterval);
+    const recurrenceInterval =
+      body.recurrenceInterval === null || body.recurrenceInterval === undefined
+        ? null
+        : Number.isFinite(parsedRecurrence)
+          ? Math.max(1, parsedRecurrence)
+          : null;
+    const recurrenceUnit =
+      body.recurrenceUnit === "day" || body.recurrenceUnit === "week" || body.recurrenceUnit === "month"
+        ? body.recurrenceUnit
+        : null;
 
     if (!toDo || !dueDateNextStep) {
       return NextResponse.json(
@@ -73,7 +86,9 @@ export async function POST(request: NextRequest) {
       tipo,
       nextStep,
       dueDateNextStep,
-      statusNextStep
+      statusNextStep,
+      recurrenceInterval: recurrenceUnit ? recurrenceInterval || 1 : null,
+      recurrenceUnit
     });
 
     return NextResponse.json({ ok: true, rowId });

@@ -34,6 +34,8 @@ export type Task = {
   nextStep: string;
   dueDateNextStep: string;
   statusNextStep: string;
+  recurrenceInterval: number | null;
+  recurrenceUnit: "day" | "week" | "month" | null;
 };
 
 export type AddTaskPayload = Omit<Task, "rowId">;

@@ -77,10 +77,20 @@ async function run() {
       next_step TEXT NOT NULL DEFAULT '',
       due_date_next_step DATE NOT NULL,
       status_next_step TEXT NOT NULL DEFAULT '',
+      recurrence_interval INTEGER,
+      recurrence_unit TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  await pool.query(
+    `ALTER TABLE tasks
+     ADD COLUMN IF NOT EXISTS recurrence_interval INTEGER`
+  );
+  await pool.query(
+    `ALTER TABLE tasks
+     ADD COLUMN IF NOT EXISTS recurrence_unit TEXT`
+  );
 
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)`);

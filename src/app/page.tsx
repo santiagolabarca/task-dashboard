@@ -58,12 +58,15 @@ type DueWindow = "today_overdue" | "today" | "this_week" | "overdue" | "all";
 type SortOption = "overdue_due" | "due_asc" | "due_desc" | "title_az" | "title_za";
 type ViewMode = "list" | "canvas";
 type CanvasColumnId = "overdue" | "today" | "tomorrow" | "this_week" | "later" | "no_due";
+type RecurrencePreset = "none" | "daily" | "weekly" | "monthly" | "custom";
 
 type ToastState = {
   visible: boolean;
   message: string;
   tone: "success" | "error";
 };
+
+const SYNC_REFRESH_THRESHOLD = 4;
 
 const CANVAS_COLUMNS: Array<{ id: CanvasColumnId; label: string; accent: string }> = [
   { id: "overdue", label: "Overdue", accent: "border-red-300" },
@@ -81,7 +84,9 @@ function defaultFormValues(tipo = "Others"): AddTaskPayload {
     tipo,
     nextStep: "",
     dueDateNextStep: todayIsoDate(),
-    statusNextStep: ""
+    statusNextStep: "",
+    recurrenceInterval: null,
+    recurrenceUnit: null
   };
 }
 
@@ -215,6 +220,14 @@ function taskFromPayload(rowId: number, payload: AddTaskPayload): Task {
   };
 }
 
+function recurrencePresetFromTask(task: Pick<Task, "recurrenceInterval" | "recurrenceUnit">): RecurrencePreset {
+  if (!task.recurrenceInterval || !task.recurrenceUnit) return "none";
+  if (task.recurrenceInterval === 1 && task.recurrenceUnit === "day") return "daily";
+  if (task.recurrenceInterval === 1 && task.recurrenceUnit === "week") return "weekly";
+  if (task.recurrenceInterval === 1 && task.recurrenceUnit === "month") return "monthly";
+  return "custom";
+}
+
 function getCanvasColumnId(task: Task, today: string, tomorrow: string, weekEnd: string): CanvasColumnId {
   const due = task.dueDateNextStep;
   if (!due) return "no_due";
@@ -247,6 +260,9 @@ export default function HomePage() {
   const [error, setError] = useState<string | null>(null);
 
   const [form, setForm] = useState<AddTaskPayload>(() => defaultFormValues());
+  const [addRecurrencePreset, setAddRecurrencePreset] = useState<RecurrencePreset>("none");
+  const [addRecurrenceInterval, setAddRecurrenceInterval] = useState(2);
+  const [addRecurrenceUnit, setAddRecurrenceUnit] = useState<"day" | "week" | "month">("week");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("open");
@@ -257,9 +273,13 @@ export default function HomePage() {
   const [searchQuery, setSearchQuery] = useState("");
 
   const [pendingRows, setPendingRows] = useState<Record<number, boolean>>({});
+  const [pendingSyncChanges, setPendingSyncChanges] = useState(0);
 
   const [editRowId, setEditRowId] = useState<number | null>(null);
   const [editForm, setEditForm] = useState<AddTaskPayload | null>(null);
+  const [editRecurrencePreset, setEditRecurrencePreset] = useState<RecurrencePreset>("none");
+  const [editRecurrenceInterval, setEditRecurrenceInterval] = useState(2);
+  const [editRecurrenceUnit, setEditRecurrenceUnit] = useState<"day" | "week" | "month">("week");
   const [isSavingEdit, setIsSavingEdit] = useState(false);
 
   const [toast, setToast] = useState<ToastState>({
@@ -448,6 +468,96 @@ export default function HomePage() {
     return normalizeTipoOptions([...fromPreferences, ...fromTasks]);
   }, [tasks, userTipoOptions]);
 
+  const applyAddRecurrence = useCallback(
+    (
+      preset: RecurrencePreset,
+      customInterval = addRecurrenceInterval,
+      customUnit = addRecurrenceUnit
+    ) => {
+      if (preset === "none") {
+        setForm((current) => ({ ...current, recurrenceInterval: null, recurrenceUnit: null }));
+        return;
+      }
+      if (preset === "daily") {
+        setForm((current) => ({ ...current, recurrenceInterval: 1, recurrenceUnit: "day" }));
+        return;
+      }
+      if (preset === "weekly") {
+        setForm((current) => ({ ...current, recurrenceInterval: 1, recurrenceUnit: "week" }));
+        return;
+      }
+      if (preset === "monthly") {
+        setForm((current) => ({ ...current, recurrenceInterval: 1, recurrenceUnit: "month" }));
+        return;
+      }
+      setForm((current) => ({
+        ...current,
+        recurrenceInterval: Math.max(1, Number(customInterval || 1)),
+        recurrenceUnit: customUnit
+      }));
+    },
+    [addRecurrenceInterval, addRecurrenceUnit]
+  );
+
+  const applyEditRecurrence = useCallback(
+    (
+      preset: RecurrencePreset,
+      customInterval = editRecurrenceInterval,
+      customUnit = editRecurrenceUnit
+    ) => {
+      if (preset === "none") {
+        setEditForm((current) =>
+          current ? { ...current, recurrenceInterval: null, recurrenceUnit: null } : current
+        );
+        return;
+      }
+      if (preset === "daily") {
+        setEditForm((current) =>
+          current ? { ...current, recurrenceInterval: 1, recurrenceUnit: "day" } : current
+        );
+        return;
+      }
+      if (preset === "weekly") {
+        setEditForm((current) =>
+          current ? { ...current, recurrenceInterval: 1, recurrenceUnit: "week" } : current
+        );
+        return;
+      }
+      if (preset === "monthly") {
+        setEditForm((current) =>
+          current ? { ...current, recurrenceInterval: 1, recurrenceUnit: "month" } : current
+        );
+        return;
+      }
+      setEditForm((current) =>
+        current
+          ? {
+              ...current,
+              recurrenceInterval: Math.max(1, Number(customInterval || 1)),
+              recurrenceUnit: customUnit
+            }
+          : current
+      );
+    },
+    [editRecurrenceInterval, editRecurrenceUnit]
+  );
+
+  useEffect(() => {
+    if (addRecurrencePreset === "custom") {
+      applyAddRecurrence("custom");
+    } else {
+      applyAddRecurrence(addRecurrencePreset);
+    }
+  }, [addRecurrencePreset, addRecurrenceInterval, addRecurrenceUnit, applyAddRecurrence]);
+
+  useEffect(() => {
+    if (editRecurrencePreset === "custom") {
+      applyEditRecurrence("custom");
+    } else {
+      applyEditRecurrence(editRecurrencePreset);
+    }
+  }, [editRecurrencePreset, editRecurrenceInterval, editRecurrenceUnit, applyEditRecurrence]);
+
   const baseFilteredTasks = useMemo(() => {
     const matches = (task: Task): boolean => {
       const normalizedStatus = normalizeStatus(task.statusFinalOutcome);
@@ -539,13 +649,46 @@ export default function HomePage() {
     setPendingRows((current) => ({ ...current, [rowId]: pending }));
   };
 
+  const registerSuccessfulMutation = useCallback(async () => {
+    let shouldRefresh = false;
+    setPendingSyncChanges((current) => {
+      const next = current + 1;
+      if (next >= SYNC_REFRESH_THRESHOLD) {
+        shouldRefresh = true;
+        return 0;
+      }
+      return next;
+    });
+
+    if (shouldRefresh) {
+      await loadTasks();
+    }
+  }, [loadTasks]);
+
+  useEffect(() => {
+    const syncOnLeave = () => {
+      if (pendingSyncChanges > 0) {
+        void loadTasks();
+        setPendingSyncChanges(0);
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        syncOnLeave();
+      }
+    };
+
+    window.addEventListener("pagehide", syncOnLeave);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("pagehide", syncOnLeave);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [loadTasks, pendingSyncChanges]);
+
   const applyPatchOptimistic = useCallback(
-    async (
-      rowId: number,
-      patch: TaskPatch,
-      successMessage: string,
-      refreshAfter = false
-    ): Promise<boolean> => {
+    async (rowId: number, patch: TaskPatch, successMessage: string): Promise<boolean> => {
       const normalized = normalizeTaskPatch(patch);
       if (Object.keys(normalized).length === 0) return true;
 
@@ -565,9 +708,7 @@ export default function HomePage() {
       setRowPending(rowId, true);
       try {
         await updateTask(rowId, normalized);
-        if (refreshAfter) {
-          await loadTasks();
-        }
+        await registerSuccessfulMutation();
         pushToast(successMessage);
         return true;
       } catch (updateError) {
@@ -584,7 +725,7 @@ export default function HomePage() {
         setRowPending(rowId, false);
       }
     },
-    [loadTasks, pushToast]
+    [pushToast, registerSuccessfulMutation]
   );
 
   const onAddSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -599,7 +740,9 @@ export default function HomePage() {
       nextStep: "",
       dueDateNextStep: normalizedDueDate,
       // This field is formula-driven in Sheets and should not be manually set on add.
-      statusNextStep: ""
+      statusNextStep: "",
+      recurrenceInterval: form.recurrenceUnit ? form.recurrenceInterval : null,
+      recurrenceUnit: form.recurrenceUnit
     };
 
     if (!payload.toDo || !payload.dueDateNextStep || !/^\d{4}-\d{2}-\d{2}$/.test(payload.dueDateNextStep)) {
@@ -624,9 +767,12 @@ export default function HomePage() {
         )
       );
       setForm(defaultFormValues(userTipoOptions[0] || "Others"));
+      setAddRecurrencePreset("none");
+      setAddRecurrenceInterval(2);
+      setAddRecurrenceUnit("week");
       requestAnimationFrame(() => addTaskTitleRef.current?.focus());
+      await registerSuccessfulMutation();
       pushToast("Added", "success");
-      await loadTasks();
     } catch (addError) {
       setTasks((current) => current.filter((task) => task.rowId !== tempRowId));
       const message = addError instanceof Error ? addError.message : "Failed to add task.";
@@ -643,7 +789,7 @@ export default function HomePage() {
 
   const handleMarkDone = async (task: Task) => {
     if (task.statusFinalOutcome === "Done") return;
-    await applyPatchOptimistic(task.rowId, { statusFinalOutcome: "Done" }, "Marked as done", true);
+    await applyPatchOptimistic(task.rowId, { statusFinalOutcome: "Done" }, "Marked as done");
   };
 
   const handleLogout = async () => {
@@ -709,10 +855,11 @@ export default function HomePage() {
 
   const handleMoveTomorrow = async (task: Task) => {
     const nextDate = addDaysToIsoDate(today, 1);
-    await applyPatchOptimistic(task.rowId, { dueDateNextStep: nextDate }, "Moved to tomorrow", true);
+    await applyPatchOptimistic(task.rowId, { dueDateNextStep: nextDate }, "Moved to tomorrow");
   };
 
   const openEditModal = (task: Task) => {
+    const preset = recurrencePresetFromTask(task);
     setEditRowId(task.rowId);
     setEditForm({
       toDo: task.toDo,
@@ -720,13 +867,21 @@ export default function HomePage() {
       tipo: task.tipo || availableTipoOptions[0] || "Others",
       nextStep: task.nextStep || "",
       dueDateNextStep: task.dueDateNextStep || today,
-      statusNextStep: task.statusNextStep || ""
+      statusNextStep: task.statusNextStep || "",
+      recurrenceInterval: task.recurrenceInterval,
+      recurrenceUnit: task.recurrenceUnit
     });
+    setEditRecurrencePreset(preset);
+    if (task.recurrenceInterval) setEditRecurrenceInterval(task.recurrenceInterval);
+    if (task.recurrenceUnit) setEditRecurrenceUnit(task.recurrenceUnit);
   };
 
   const closeEditModal = () => {
     setEditRowId(null);
     setEditForm(null);
+    setEditRecurrencePreset("none");
+    setEditRecurrenceInterval(2);
+    setEditRecurrenceUnit("week");
   };
 
   const saveEdit = async () => {
@@ -740,10 +895,11 @@ export default function HomePage() {
         statusFinalOutcome: editForm.statusFinalOutcome,
         tipo: editForm.tipo,
         nextStep: editForm.nextStep.trim(),
-        dueDateNextStep: editForm.dueDateNextStep
+        dueDateNextStep: editForm.dueDateNextStep,
+        recurrenceInterval: editForm.recurrenceUnit ? editForm.recurrenceInterval : null,
+        recurrenceUnit: editForm.recurrenceUnit
       },
-      "Task updated",
-      true
+      "Task updated"
     );
 
     setIsSavingEdit(false);
@@ -976,6 +1132,54 @@ export default function HomePage() {
                 />
               </label>
 
+              <div className="space-y-2 md:col-span-2">
+                <span className="text-sm font-medium text-slate-700">Repeats</span>
+                <div className="flex flex-wrap gap-2">
+                  {([
+                    ["none", "Does not repeat"],
+                    ["daily", "Daily"],
+                    ["weekly", "Weekly"],
+                    ["monthly", "Monthly"],
+                    ["custom", "Custom"]
+                  ] as Array<[RecurrencePreset, string]>).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className={`rounded-full border px-3 py-1.5 text-sm ${
+                        addRecurrencePreset === value
+                          ? "border-brand-500 bg-brand-100 text-brand-800"
+                          : "border-slate-300 bg-white text-slate-700"
+                      }`}
+                      onClick={() => setAddRecurrencePreset(value)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {addRecurrencePreset === "custom" && (
+                  <div className="grid grid-cols-2 gap-2 max-w-sm">
+                    <Input
+                      type="number"
+                      min={1}
+                      value={addRecurrenceInterval}
+                      onChange={(event) =>
+                        setAddRecurrenceInterval(Math.max(1, Number(event.target.value || 1)))
+                      }
+                    />
+                    <Select
+                      value={addRecurrenceUnit}
+                      onChange={(event) =>
+                        setAddRecurrenceUnit(event.target.value as "day" | "week" | "month")
+                      }
+                    >
+                      <option value="day">day(s)</option>
+                      <option value="week">week(s)</option>
+                      <option value="month">month(s)</option>
+                    </Select>
+                  </div>
+                )}
+              </div>
+
               <div className="md:col-span-3 flex justify-end">
                 <Button type="submit" disabled={isSubmitting}>
                   {isSubmitting ? "Adding..." : "Add task"}
@@ -1207,6 +1411,12 @@ export default function HomePage() {
                         </p>
                         {task.nextStep && <p>Next step: {task.nextStep}</p>}
                         <p>Status for next step: {task.statusNextStep || "-"}</p>
+                        {task.recurrenceUnit && task.recurrenceInterval && (
+                          <p>
+                            Repeats: every {task.recurrenceInterval} {task.recurrenceUnit}
+                            {task.recurrenceInterval > 1 ? "s" : ""}
+                          </p>
+                        )}
                       </div>
 
                       <div className="mt-4 flex flex-wrap gap-2">
@@ -1296,6 +1506,12 @@ export default function HomePage() {
                                   <p className="mt-1 text-xs text-slate-700">
                                     Next step status: {task.statusNextStep || "-"}
                                   </p>
+                                  {task.recurrenceUnit && task.recurrenceInterval && (
+                                    <p className="mt-1 text-xs text-slate-700">
+                                      Repeats: every {task.recurrenceInterval} {task.recurrenceUnit}
+                                      {task.recurrenceInterval > 1 ? "s" : ""}
+                                    </p>
+                                  )}
                                   <div className="mt-3 flex flex-wrap gap-2">
                                     <Button
                                       variant="primary"
@@ -1404,6 +1620,54 @@ export default function HomePage() {
                 }
               />
             </label>
+
+            <div className="space-y-2 md:col-span-2">
+              <span className="text-sm font-medium text-slate-700">Repeats</span>
+              <div className="flex flex-wrap gap-2">
+                {([
+                  ["none", "Does not repeat"],
+                  ["daily", "Daily"],
+                  ["weekly", "Weekly"],
+                  ["monthly", "Monthly"],
+                  ["custom", "Custom"]
+                ] as Array<[RecurrencePreset, string]>).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    className={`rounded-full border px-3 py-1.5 text-sm ${
+                      editRecurrencePreset === value
+                        ? "border-brand-500 bg-brand-100 text-brand-800"
+                        : "border-slate-300 bg-white text-slate-700"
+                    }`}
+                    onClick={() => setEditRecurrencePreset(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {editRecurrencePreset === "custom" && (
+                <div className="grid grid-cols-2 gap-2 max-w-sm">
+                  <Input
+                    type="number"
+                    min={1}
+                    value={editRecurrenceInterval}
+                    onChange={(event) =>
+                      setEditRecurrenceInterval(Math.max(1, Number(event.target.value || 1)))
+                    }
+                  />
+                  <Select
+                    value={editRecurrenceUnit}
+                    onChange={(event) =>
+                      setEditRecurrenceUnit(event.target.value as "day" | "week" | "month")
+                    }
+                  >
+                    <option value="day">day(s)</option>
+                    <option value="week">week(s)</option>
+                    <option value="month">month(s)</option>
+                  </Select>
+                </div>
+              )}
+            </div>
 
             <div className="md:col-span-2 flex justify-end gap-2 pt-2">
               <Button variant="ghost" onClick={closeEditModal}>

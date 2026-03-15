@@ -93,10 +93,20 @@ async function run() {
       next_step TEXT NOT NULL DEFAULT '',
       due_date_next_step DATE NOT NULL,
       status_next_step TEXT NOT NULL DEFAULT '',
+      recurrence_interval INTEGER,
+      recurrence_unit TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  await pool.query(
+    `ALTER TABLE tasks
+     ADD COLUMN IF NOT EXISTS recurrence_interval INTEGER`
+  );
+  await pool.query(
+    `ALTER TABLE tasks
+     ADD COLUMN IF NOT EXISTS recurrence_unit TEXT`
+  );
 
   const ownerEmail = String(process.env.DEFAULT_OWNER_EMAIL || "Santiago.labarca@berkeley.edu")
     .trim()
@@ -146,8 +156,8 @@ async function run() {
       if (!toDo || !dueDateNextStep) continue;
 
       await client.query(
-        `INSERT INTO tasks (user_id, to_do, status_final_outcome, tipo, next_step, due_date_next_step, status_next_step, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6::date, $7, NOW())`,
+        `INSERT INTO tasks (user_id, to_do, status_final_outcome, tipo, next_step, due_date_next_step, status_next_step, recurrence_interval, recurrence_unit, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6::date, $7, NULL, NULL, NOW())`,
         [
           ownerUserId,
           toDo,

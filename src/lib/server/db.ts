@@ -9,6 +9,8 @@ type TaskRow = {
   next_step: string;
   due_date_next_step: string;
   status_next_step: string;
+  recurrence_interval: number | null;
+  recurrence_unit: "day" | "week" | "month" | null;
 };
 
 type UserRow = {
@@ -30,6 +32,8 @@ export type DbTask = {
   nextStep: string;
   dueDateNextStep: string;
   statusNextStep: string;
+  recurrenceInterval: number | null;
+  recurrenceUnit: "day" | "week" | "month" | null;
 };
 
 export type DbUser = {
@@ -86,7 +90,9 @@ function toTask(row: TaskRow): DbTask {
     tipo: row.tipo,
     nextStep: row.next_step,
     dueDateNextStep: row.due_date_next_step,
-    statusNextStep: row.status_next_step
+    statusNextStep: row.status_next_step,
+    recurrenceInterval: row.recurrence_interval === null ? null : Number(row.recurrence_interval),
+    recurrenceUnit: row.recurrence_unit
   };
 }
 
@@ -194,10 +200,20 @@ async function initialize(): Promise<void> {
           next_step TEXT NOT NULL DEFAULT '',
           due_date_next_step DATE NOT NULL,
           status_next_step TEXT NOT NULL DEFAULT '',
+          recurrence_interval INTEGER,
+          recurrence_unit TEXT,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `);
+      await pool.query(
+        `ALTER TABLE tasks
+         ADD COLUMN IF NOT EXISTS recurrence_interval INTEGER`
+      );
+      await pool.query(
+        `ALTER TABLE tasks
+         ADD COLUMN IF NOT EXISTS recurrence_unit TEXT`
+      );
 
       await pool.query(`CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)`);
       await pool.query(`CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)`);
@@ -219,7 +235,7 @@ export async function listDbTasksByUser(userId: number): Promise<DbTask[]> {
   const result = await getPool().query<TaskRow>(
     `SELECT id, to_do, status_final_outcome, tipo, next_step,
             to_char(due_date_next_step, 'YYYY-MM-DD') AS due_date_next_step,
-            status_next_step
+            status_next_step, recurrence_interval, recurrence_unit
      FROM tasks
      WHERE user_id = $1
      ORDER BY due_date_next_step ASC, id ASC`,
@@ -236,8 +252,8 @@ export async function createDbTaskForUser(
   await initialize();
 
   const result = await getPool().query<{ id: number }>(
-    `INSERT INTO tasks (user_id, to_do, status_final_outcome, tipo, next_step, due_date_next_step, status_next_step, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6::date, $7, NOW())
+    `INSERT INTO tasks (user_id, to_do, status_final_outcome, tipo, next_step, due_date_next_step, status_next_step, recurrence_interval, recurrence_unit, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6::date, $7, $8, $9, NOW())
      RETURNING id`,
     [
       userId,
@@ -246,7 +262,9 @@ export async function createDbTaskForUser(
       input.tipo,
       input.nextStep,
       input.dueDateNextStep,
-      input.statusNextStep
+      input.statusNextStep,
+      input.recurrenceInterval,
+      input.recurrenceUnit
     ]
   );
 
@@ -259,7 +277,7 @@ export async function getDbTaskByIdForUser(id: number, userId: number): Promise<
   const result = await getPool().query<TaskRow>(
     `SELECT id, to_do, status_final_outcome, tipo, next_step,
             to_char(due_date_next_step, 'YYYY-MM-DD') AS due_date_next_step,
-            status_next_step
+            status_next_step, recurrence_interval, recurrence_unit
      FROM tasks
      WHERE id = $1 AND user_id = $2`,
     [id, userId]
@@ -283,7 +301,9 @@ export async function updateDbTaskForUser(
     tipo: patch.tipo ?? existing.tipo,
     nextStep: patch.nextStep ?? existing.nextStep,
     dueDateNextStep: patch.dueDateNextStep ?? existing.dueDateNextStep,
-    statusNextStep: patch.statusNextStep ?? existing.statusNextStep
+    statusNextStep: patch.statusNextStep ?? existing.statusNextStep,
+    recurrenceInterval: patch.recurrenceInterval ?? existing.recurrenceInterval,
+    recurrenceUnit: patch.recurrenceUnit ?? existing.recurrenceUnit
   };
 
   await initialize();
@@ -295,8 +315,10 @@ export async function updateDbTaskForUser(
          next_step = $4,
          due_date_next_step = $5::date,
          status_next_step = $6,
+         recurrence_interval = $7,
+         recurrence_unit = $8,
          updated_at = NOW()
-     WHERE id = $7 AND user_id = $8`,
+     WHERE id = $9 AND user_id = $10`,
     [
       next.toDo,
       next.statusFinalOutcome,
@@ -304,6 +326,8 @@ export async function updateDbTaskForUser(
       next.nextStep,
       next.dueDateNextStep,
       next.statusNextStep,
+      next.recurrenceInterval,
+      next.recurrenceUnit,
       id,
       userId
     ]
@@ -325,8 +349,8 @@ export async function replaceAllDbTasksForUser(
 
     for (const task of tasks) {
       await client.query(
-        `INSERT INTO tasks (user_id, to_do, status_final_outcome, tipo, next_step, due_date_next_step, status_next_step, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6::date, $7, NOW())`,
+        `INSERT INTO tasks (user_id, to_do, status_final_outcome, tipo, next_step, due_date_next_step, status_next_step, recurrence_interval, recurrence_unit, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6::date, $7, $8, $9, NOW())`,
         [
           userId,
           task.toDo,
@@ -334,7 +358,9 @@ export async function replaceAllDbTasksForUser(
           task.tipo,
           task.nextStep,
           task.dueDateNextStep,
-          task.statusNextStep
+          task.statusNextStep,
+          task.recurrenceInterval,
+          task.recurrenceUnit
         ]
       );
     }
